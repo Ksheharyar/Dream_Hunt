@@ -1,0 +1,955 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Emberblade</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#1a2614;font-family:sans-serif;touch-action:none}
+  canvas{display:block;width:100%;height:100%}
+  #dev{position:fixed;top:4px;left:4px;color:#7fe07f;font:12px monospace;display:none;z-index:50;background:rgba(0,0,0,0.4);padding:2px 6px;border-radius:4px}
+  #ui-layer{position:fixed;inset:0;pointer-events:none;z-index:10}
+  .touch-btn{position:fixed;pointer-events:auto;border-radius:50%;background:rgba(255,255,255,0.12);
+    border:2px solid rgba(255,255,255,0.35);color:#fff;font-size:22px;display:flex;align-items:center;
+    justify-content:center;user-select:none;font-weight:bold;font-family:sans-serif}
+  .touch-btn:active{background:rgba(255,255,255,0.3)}
+  #startScreen,#endScreen{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;background:rgba(10,16,8,0.9);color:#fdeedd;text-align:center;z-index:60;
+    pointer-events:auto;font-family:sans-serif}
+  #startScreen h1,#endScreen h1{font-size:42px;margin:0 0 8px;color:#ffb066;text-shadow:0 2px 0 #4a1b0c}
+  #startScreen p,#endScreen p{font-size:16px;max-width:420px;line-height:1.5;color:#e8d9c8}
+  .startBtn{margin-top:18px;padding:12px 32px;font-size:18px;border-radius:8px;border:2px solid #ffb066;
+    background:#d85a30;color:#fff;cursor:pointer;font-weight:bold}
+  .startBtn:active{transform:scale(0.97)}
+  #hidden{display:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="dev"></div>
+<div id="ui-layer">
+  <div id="touchControls" style="display:none">
+    <div class="touch-btn" id="btnLeft"  style="left:18px;bottom:84px;width:60px;height:60px;font-size:26px">&#9664;</div>
+    <div class="touch-btn" id="btnRight" style="left:92px;bottom:84px;width:60px;height:60px;font-size:26px">&#9654;</div>
+    <div class="touch-btn" id="btnJump"  style="right:96px;bottom:96px;width:70px;height:70px;font-size:18px">JUMP</div>
+    <div class="touch-btn" id="btnAtk"   style="right:20px;bottom:160px;width:62px;height:62px;font-size:14px">SWORD</div>
+    <div class="touch-btn" id="btnMag"   style="right:20px;bottom:40px;width:62px;height:62px;font-size:14px">FLAME</div>
+  </div>
+</div>
+
+<div id="startScreen">
+  <h1>EMBERBLADE</h1>
+  <p>The village of Holvane has fallen quiet. Your mentor Doras lies slain by a Hollowed
+  creature, and a dying ember-spirit hands you the shattered hilt of an ancient blade.
+  Gather the three Ember Shards scattered across the Cinderwood, the Sunken Mines, and
+  Frostpeak Keep — reforge the Emberblade — and end the corruption at its source: the
+  Hollow King.</p>
+  <p style="margin-top:10px;font-size:13px;color:#bfae9a">Move: Arrows / A-D &nbsp;|&nbsp;
+  Jump: Space / Up &nbsp;|&nbsp; Sword: Z &nbsp;|&nbsp; Flame Bolt: X<br>
+  Gamepad and touch supported.</p>
+  <button class="startBtn" id="startBtn">Begin</button>
+</div>
+
+<div id="endScreen" style="display:none">
+  <h1 id="endTitle">Victory</h1>
+  <p id="endText"></p>
+  <button class="startBtn" id="restartBtn">Play Again</button>
+</div>
+
+<script type="module">
+import { STR } from "./strings.js";
+
+/* ============================== INPUT ============================== */
+const BIND = {
+  ArrowLeft:"left", ArrowRight:"right", ArrowUp:"jump", ArrowDown:"down",
+  KeyA:"left", KeyD:"right", KeyW:"jump", KeyS:"down",
+  Space:"jump", KeyZ:"attack", KeyX:"magic"
+};
+const PAD = { 0:"jump", 2:"attack", 3:"magic", 14:"left", 15:"right", 12:"jump" };
+const held = new Set();
+addEventListener("keydown", e => { const c = BIND[e.code]; if (c) { held.add(c); if(["Space","ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.code)) e.preventDefault(); } });
+addEventListener("keyup",   e => { const c = BIND[e.code]; if (c) held.delete(c); });
+
+const touchState = new Set();
+function bindTouch(id, cmd){
+  const el = document.getElementById(id);
+  el.addEventListener("touchstart", e => { touchState.add(cmd); e.preventDefault(); }, {passive:false});
+  el.addEventListener("touchend",   e => { touchState.delete(cmd); e.preventDefault(); }, {passive:false});
+  el.addEventListener("touchcancel",e => { touchState.delete(cmd); e.preventDefault(); }, {passive:false});
+  el.addEventListener("mousedown", e => { touchState.add(cmd); e.preventDefault(); });
+  el.addEventListener("mouseup",   e => { touchState.delete(cmd); e.preventDefault(); });
+  el.addEventListener("mouseleave",e => { touchState.delete(cmd); });
+}
+bindTouch("btnLeft","left"); bindTouch("btnRight","right");
+bindTouch("btnJump","jump"); bindTouch("btnAtk","attack"); bindTouch("btnMag","magic");
+
+if ('ontouchstart' in window) {
+  document.getElementById("touchControls").style.display = "block";
+}
+
+function padCommands(){
+  const out = new Set();
+  for (const gp of navigator.getGamepads?.() ?? []) {
+    if (!gp) continue;
+    gp.buttons.forEach((b,i)=>{ if (b.pressed && PAD[i]) out.add(PAD[i]); });
+    if (gp.axes[0] < -0.35) out.add("left");
+    if (gp.axes[0] > 0.35) out.add("right");
+  }
+  return out;
+}
+function commands(){ return new Set([...held, ...touchState, ...padCommands()]); }
+
+/* edge detection for actions that should not auto-repeat every frame */
+let prevCmds = new Set();
+function pressedThisFrame(cmds, name){ return cmds.has(name) && !prevCmds.has(name); }
+
+/* ============================== CANVAS ============================== */
+const canvas = document.getElementById("c"), ctx = canvas.getContext("2d");
+const DPR_CAP = 1.5;
+let VW = 960, VH = 540; // logical viewport (world units)
+function resize(){
+  const dpr = Math.min(devicePixelRatio||1, DPR_CAP);
+  canvas.width = innerWidth*dpr; canvas.height = innerHeight*dpr;
+  canvas.style.width = innerWidth+"px"; canvas.style.height = innerHeight+"px";
+  VW = innerWidth; VH = innerHeight;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+addEventListener("resize", resize); addEventListener("orientationchange", resize); resize();
+
+/* ============================== RNG (seeded, deterministic) ============================== */
+function makeRng(seed){
+  let s = seed >>> 0;
+  return function(){ s ^= s<<13; s^=s>>>17; s^=s<<5; s>>>=0; return (s>>>0)/4294967296; };
+}
+const rngLogic = makeRng(20260612);
+const rngFx    = makeRng(99887766);
+
+/* ============================== CONSTANTS (agency metrics) ============================== */
+const GRAVITY = 1400;
+const MOVE_SPEED = 220;
+const JUMP_VEL = -520;
+const COYOTE_MS = 100;
+const BUFFER_MS = 120;
+const SWORD_RANGE = 48;
+const SWORD_TIME = 0.20;
+const BOLT_SPEED = 400;
+const MAG_MAX = 5;
+const MAG_REGEN_PER_S = 1/3;
+const TILE = 48;
+
+/* ============================== PALETTE (style formula) ============================== */
+const PAL = {
+  forestBg: ["#3a4a2a","#2a3a1f","#1f2a16"],
+  forestGround: "#4a3422",
+  forestGroundTop: "#5c7a3a",
+  caveBg: ["#5a4a30","#3f3322","#2a2218"],
+  caveGround: "#6b5a3f",
+  caveGroundTop: "#8a7350",
+  iceBg: ["#bcd6e6","#8fb6ce","#5f8ba8"],
+  iceGround: "#bfe3f0",
+  iceGroundTop: "#e8f8ff",
+  hero: "#e8825a",
+  heroAccent: "#fdeedd",
+  enemy: "#3a2e3a",
+  enemyAccent: "#7fe07f",
+  boss: "#5a3a4a",
+  amber: "#ffc857",
+  ember: "#ff9f43",
+  heart: "#ff6b5a",
+  spike: "#bcbcbc",
+  text: "#fdeedd"
+};
+
+/* ============================== STRINGS / HUD ============================== */
+const dev = new URLSearchParams(location.search).has("dev");
+if (dev) document.getElementById("dev").style.display = "block";
+
+/* ============================== LEVEL DATA ==============================
+   Tile grid legend:
+   . empty   # ground   ^ spike   P platform-step   S shard pickup
+   Each zone is built from rows of strings; tile size = TILE px.
+============================================================================ */
+
+function buildZone1(){
+  // Cinderwood Hollow - forest, mini-boss Bramblemaw
+  const rows = [
+    "................................................................................",
+    "................................................................................",
+    "................................................................................",
+    ".......E..............E.................E.....................................",
+    "....################..........####....................########...............",
+    "................................................................................",
+    "..........^^^................E.....................^^^^.......E...............",
+    "########################################...##########################.....####",
+  ];
+  return { rows, name: STR.zone1Name, theme:"forest",
+    spawns: [
+      {type:"enemy", kind:"hollowed", x:7*TILE, y:3*TILE},
+      {type:"enemy", kind:"hollowed", x:22*TILE, y:3*TILE},
+      {type:"enemy", kind:"brambling", x:41*TILE, y:3*TILE},
+      {type:"enemy", kind:"hollowed", x:64*TILE, y:6*TILE},
+      {type:"pickup", kind:"shard", x:30*TILE, y:3*TILE},
+      {type:"pickup", kind:"heart", x:14*TILE, y:3*TILE},
+      {type:"pickup", kind:"coin", x:48*TILE, y:3*TILE},
+      {type:"pickup", kind:"coin", x:50*TILE, y:3*TILE},
+      {type:"checkpoint", x:2*TILE, y:6*TILE},
+      {type:"checkpoint", x:60*TILE, y:5*TILE},
+    ],
+    boss: {kind:"bramblemaw", x:74*TILE, y:5*TILE, hp:40},
+    playerStart: {x:1*TILE, y:5*TILE},
+    bossGateX: 70*TILE,
+    width: rows[0].length*TILE
+  };
+}
+
+function buildZone2(){
+  // Sunken Mines of Greybrook - caves, mini-boss Slagforged Sentinel
+  const rows = [
+    "................................................................................",
+    "................................................................................",
+    "....########............................########..............................",
+    "................................................................................",
+    "..........E..........E..........................E........E....................",
+    "..^^^^..........############..........^^^^^^..............############........",
+    "##########..................########...........#####################....######",
+  ];
+  return { rows, name: STR.zone2Name, theme:"cave",
+    spawns: [
+      {type:"enemy", kind:"hollowed", x:10*TILE, y:3*TILE},
+      {type:"enemy", kind:"brambling", x:22*TILE, y:3*TILE},
+      {type:"enemy", kind:"hollowed", x:50*TILE, y:3*TILE},
+      {type:"enemy", kind:"brambling", x:60*TILE, y:3*TILE},
+      {type:"pickup", kind:"shard", x:34*TILE, y:5*TILE},
+      {type:"pickup", kind:"heart", x:18*TILE, y:1*TILE},
+      {type:"pickup", kind:"coin", x:44*TILE, y:5*TILE},
+      {type:"pickup", kind:"coin", x:46*TILE, y:5*TILE},
+      {type:"checkpoint", x:2*TILE, y:5*TILE},
+      {type:"checkpoint", x:56*TILE, y:5*TILE},
+    ],
+    boss: {kind:"slagforged", x:74*TILE, y:4*TILE, hp:55},
+    playerStart: {x:1*TILE, y:4*TILE},
+    bossGateX: 70*TILE,
+    width: rows[0].length*TILE
+  };
+}
+
+function buildZone3(){
+  // Frostpeak Keep - ice fortress, final boss Hollow King
+  const rows = [
+    "................................................................................",
+    "................................................................................",
+    "................................................................................",
+    "....E.......................E....................E.............................",
+    "..........############......................############.......................",
+    "................................................................................",
+    "..^^^^^...........E..........^^^^^^^^.......................E..................",
+    "###########.................########################.................##########",
+  ];
+  return { rows, name: STR.zone3Name, theme:"ice",
+    spawns: [
+      {type:"enemy", kind:"hollowed", x:5*TILE, y:3*TILE},
+      {type:"enemy", kind:"brambling", x:29*TILE, y:3*TILE},
+      {type:"enemy", kind:"hollowed", x:51*TILE, y:3*TILE},
+      {type:"enemy", kind:"brambling", x:19*TILE, y:6*TILE},
+      {type:"enemy", kind:"hollowed", x:63*TILE, y:6*TILE},
+      {type:"pickup", kind:"shard", x:40*TILE, y:5*TILE},
+      {type:"pickup", kind:"heart", x:12*TILE, y:5*TILE},
+      {type:"pickup", kind:"coin", x:54*TILE, y:3*TILE},
+      {type:"checkpoint", x:2*TILE, y:5*TILE},
+      {type:"checkpoint", x:58*TILE, y:5*TILE},
+    ],
+    boss: {kind:"hollowking", x:75*TILE, y:4*TILE, hp:90},
+    playerStart: {x:1*TILE, y:5*TILE},
+    bossGateX: 71*TILE,
+    width: rows[0].length*TILE
+  };
+}
+
+/* ============================== WORLD / ENTITIES ============================== */
+let zones, zoneIdx, world, player, camera, particles, hudFlash;
+let gameState = "start"; // start | playing | win | lose
+
+function tileAt(rowsArr, tx, ty){
+  if (ty<0 || ty>=rowsArr.length) return '.';
+  const row = rowsArr[ty];
+  if (tx<0 || tx>=row.length) return '#';
+  return row[tx];
+}
+
+function solidAt(rowsArr, tx, ty){
+  const t = tileAt(rowsArr,tx,ty);
+  return t==='#' || t==='P';
+}
+function spikeAt(rowsArr, tx, ty){
+  return tileAt(rowsArr,tx,ty)==='^';
+}
+
+function loadZone(idx){
+  zoneIdx = idx;
+  const z = zones[idx]();
+  world = z;
+  world.enemies = [];
+  world.pickups = [];
+  world.checkpoints = [];
+  world.bossSpawned = false;
+  world.bossDefeated = false;
+  world.boss = null;
+  for (const sp of z.spawns){
+    if (sp.type==="enemy") world.enemies.push(makeEnemy(sp.kind, sp.x, sp.y));
+    else if (sp.type==="pickup") world.pickups.push({kind:sp.kind, x:sp.x, y:sp.y, w:24,h:24, taken:false, bob:rngFx()*6.28});
+    else if (sp.type==="checkpoint") world.checkpoints.push({x:sp.x,y:sp.y, active:false});
+  }
+  if (idx === 0) {
+    player.x = z.playerStart.x; player.y = z.playerStart.y;
+    player.vx=0; player.vy=0;
+  } else {
+    player.x = z.playerStart.x; player.y = z.playerStart.y;
+    player.vx=0; player.vy=0;
+  }
+  camera = {x:0,y:0};
+  particles = [];
+  hudFlash = {timer:0, text:""};
+}
+
+function makeEnemy(kind, x, y){
+  const base = {kind, x, y, vx:0, vy:0, w:32, h:36, hp:0, maxHp:0, dir:-1, state:"patrol",
+    timer: rngLogic()*1, hitFlash:0, dead:false, telegraph:0};
+  if (kind==="hollowed"){ base.hp=base.maxHp=2; base.speed=70; base.xp=8; base.dmg=0.5; }
+  if (kind==="brambling"){ base.hp=base.maxHp=3; base.speed=50; base.xp=12; base.dmg=1; }
+  if (kind==="bramblemaw"){ base.hp=base.maxHp=40; base.speed=60; base.xp=80; base.dmg=1.5; base.w=72; base.h=64; base.isBoss=true; base.phase=0; }
+  if (kind==="slagforged"){ base.hp=base.maxHp=55; base.speed=75; base.xp=120; base.dmg=2; base.w=76; base.h=72; base.isBoss=true; base.phase=0; }
+  if (kind==="hollowking"){ base.hp=base.maxHp=90; base.speed=90; base.xp=300; base.dmg=2; base.w=80; base.h=80; base.isBoss=true; base.phase=0; }
+  return base;
+}
+
+function makePlayer(){
+  return {
+    x:0, y:0, vx:0, vy:0, w:28, h:44, onGround:false,
+    facing:1, hp:6, maxHp:6, mana:MAG_MAX, maxMana:MAG_MAX,
+    level:1, xp:0, xpToNext: 20, atkBonus:0, magBonus:0, hpBonus:0,
+    statPoints:0, shards:0, coins:0,
+    coyote:0, jumpBuf:0, attackTimer:0, attackCool:0, magicCool:0,
+    invuln:0, hitFlash:0, anim:0, dead:false, respawn:null
+  };
+}
+
+function startGame(){
+  zones = [buildZone1, buildZone2, buildZone3];
+  player = makePlayer();
+  loadZone(0);
+  gameState = "playing";
+  document.getElementById("startScreen").style.display="none";
+  document.getElementById("endScreen").style.display="none";
+}
+
+/* ============================== COLLISION ============================== */
+function moveAndCollide(ent, dt, rowsArr){
+  // horizontal
+  ent.x += ent.vx*dt;
+  resolveAxis(ent, rowsArr, 'x');
+  // vertical
+  ent.y += ent.vy*dt;
+  ent.onGround = false;
+  resolveAxis(ent, rowsArr, 'y');
+}
+function resolveAxis(ent, rowsArr, axis){
+  const x0 = Math.floor(ent.x/TILE), x1 = Math.floor((ent.x+ent.w)/TILE);
+  const y0 = Math.floor(ent.y/TILE), y1 = Math.floor((ent.y+ent.h)/TILE);
+  for (let ty=y0; ty<=y1; ty++){
+    for (let tx=x0; tx<=x1; tx++){
+      if (solidAt(rowsArr, tx, ty)){
+        const tileX = tx*TILE, tileY = ty*TILE;
+        if (axis==='x'){
+          if (ent.vx>0) ent.x = tileX - ent.w;
+          else if (ent.vx<0) ent.x = tileX + TILE;
+          ent.vx = 0;
+        } else {
+          if (ent.vy>0){ ent.y = tileY - ent.h; ent.onGround=true; }
+          else if (ent.vy<0){ ent.y = tileY + TILE; }
+          ent.vy = 0;
+        }
+      }
+    }
+  }
+}
+function checkSpikes(ent, rowsArr){
+  const x0 = Math.floor((ent.x+4)/TILE), x1 = Math.floor((ent.x+ent.w-4)/TILE);
+  const y0 = Math.floor(ent.y/TILE), y1 = Math.floor((ent.y+ent.h-2)/TILE);
+  for (let ty=y0; ty<=y1; ty++)
+    for (let tx=x0; tx<=x1; tx++)
+      if (spikeAt(rowsArr, tx, ty)) return true;
+  return false;
+}
+function aabbOverlap(a,b){
+  return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
+}
+
+/* ============================== PARTICLES ============================== */
+function spawnParticles(x,y,color,n,spread){
+  for(let i=0;i<n;i++){
+    particles.push({x,y, vx:(rngFx()-0.5)*spread, vy:(rngFx()-1)*spread, life:0.4+rngFx()*0.3, color, age:0});
+  }
+}
+
+/* ============================== SWORD HITBOX ============================== */
+function swordBox(){
+  const w = SWORD_RANGE;
+  if (player.facing>0) return {x:player.x+player.w, y:player.y+6, w, h:player.h-12};
+  return {x:player.x-w, y:player.y+6, w, h:player.h-12};
+}
+
+/* ============================== PROJECTILES ============================== */
+let projectiles = [];
+
+/* ============================== GAME OVER / WIN ============================== */
+function showEnd(win){
+  gameState = win ? "win":"lose";
+  document.getElementById("endScreen").style.display="flex";
+  document.getElementById("endTitle").textContent = win ? STR.winTitle : STR.loseTitle;
+  document.getElementById("endText").textContent = win ? STR.winText : STR.loseText;
+}
+
+/* ============================== UPDATE ============================== */
+function damagePlayer(amount){
+  if (player.invuln>0) return;
+  player.hp -= amount;
+  player.invuln = 0.6;
+  player.hitFlash = 0.3;
+  spawnParticles(player.x+player.w/2, player.y+player.h/2, PAL.heart, 6, 200);
+  if (player.hp <= 0){
+    player.hp = 0;
+    respawnPlayer();
+  }
+}
+function respawnPlayer(){
+  // find last active checkpoint, else zone start
+  let cp = null;
+  for (const c of world.checkpoints) if (c.active) cp = c;
+  if (cp){ player.x = cp.x; player.y = cp.y; }
+  else { player.x = world.playerStart.x; player.y = world.playerStart.y; }
+  player.vx=0; player.vy=0; player.hp = player.maxHp; player.mana = player.maxMana;
+  player.invuln = 1.0;
+}
+
+function gainXp(amount){
+  player.xp += amount;
+  while (player.xp >= player.xpToNext){
+    player.xp -= player.xpToNext;
+    player.level++;
+    player.xpToNext = Math.floor(player.xpToNext * 1.5);
+    player.statPoints++;
+    hudFlash = {timer:2.0, text: STR.levelUp};
+    // auto-allocate: cycle HP/ATK/MAG for simplicity but visible to player via flash
+    const choice = (player.level % 3);
+    if (choice===1){ player.maxHp += 2; player.hp += 2; player.hpBonus++; }
+    else if (choice===2){ player.atkBonus++; }
+    else { player.magBonus++; }
+  }
+}
+
+function update(dt, cmds){
+  if (gameState !== "playing") { prevCmds = cmds; return; }
+  const rowsArr = world.rows;
+
+  // ---- player input ----
+  let moveDir = 0;
+  if (cmds.has("left")) { moveDir -= 1; player.facing=-1; }
+  if (cmds.has("right")) { moveDir += 1; player.facing=1; }
+  player.vx = moveDir * MOVE_SPEED;
+  if (moveDir !== 0) player.anim += dt*8;
+
+  // jump buffering + coyote time
+  player.coyote = player.onGround ? COYOTE_MS : Math.max(0, player.coyote - dt*1000);
+  if (pressedThisFrame(cmds,"jump")) player.jumpBuf = BUFFER_MS;
+  else player.jumpBuf = Math.max(0, player.jumpBuf - dt*1000);
+  if (player.jumpBuf>0 && player.coyote>0 && player.vy>=0){
+    player.vy = JUMP_VEL;
+    player.jumpBuf = 0; player.coyote = 0;
+    spawnParticles(player.x+player.w/2, player.y+player.h, PAL.text, 4, 80);
+  }
+
+  // gravity
+  player.vy += GRAVITY*dt;
+  if (player.vy > 1200) player.vy = 1200;
+
+  moveAndCollide(player, dt, rowsArr);
+  player.x = Math.max(0, Math.min(player.x, world.width - player.w));
+  if (player.y > VH*4) respawnPlayer();
+
+  if (checkSpikes(player, rowsArr)) damagePlayer(2);
+
+  // attack
+  player.attackCool = Math.max(0, player.attackCool-dt);
+  player.attackTimer = Math.max(0, player.attackTimer-dt);
+  if (pressedThisFrame(cmds,"attack") && player.attackCool<=0){
+    player.attackTimer = SWORD_TIME;
+    player.attackCool = 0.28;
+  }
+
+  // magic
+  player.magicCool = Math.max(0, player.magicCool-dt);
+  player.mana = Math.min(player.maxMana, player.mana + MAG_REGEN_PER_S*dt);
+  if (pressedThisFrame(cmds,"magic") && player.magicCool<=0 && player.mana>=1){
+    player.mana -= 1;
+    player.magicCool = 0.35;
+    projectiles.push({
+      x: player.facing>0 ? player.x+player.w : player.x-12,
+      y: player.y+player.h/2-6, vx: BOLT_SPEED*player.facing, vy:0, w:16,h:12,
+      life:1.4, dmg: 2+player.magBonus, fromPlayer:true
+    });
+    spawnParticles(player.x+player.w/2, player.y+player.h/2, PAL.amber, 4, 60);
+  }
+
+  player.invuln = Math.max(0, player.invuln-dt);
+  player.hitFlash = Math.max(0, player.hitFlash-dt);
+
+  // damage from sword on enemies
+  if (player.attackTimer>0){
+    const box = swordBox();
+    for (const e of world.enemies){
+      if (e.dead || e.hitFlash>0.05) continue;
+      if (aabbOverlap(box, e)){
+        e.hp -= (1+player.atkBonus);
+        e.hitFlash = 0.18;
+        e.vx += player.facing*120;
+        spawnParticles(e.x+e.w/2,e.y+e.h/2, PAL.amber, 5, 140);
+      }
+    }
+    if (world.boss && !world.boss.dead && world.boss.hitFlash<=0.05){
+      if (aabbOverlap(box, world.boss)){
+        world.boss.hp -= (1+player.atkBonus);
+        world.boss.hitFlash = 0.18;
+        spawnParticles(world.boss.x+world.boss.w/2, world.boss.y+world.boss.h/2, PAL.amber, 6, 160);
+      }
+    }
+  }
+
+  // ---- checkpoints ----
+  for (const c of world.checkpoints){
+    const cb = {x:c.x,y:c.y,w:24,h:48};
+    if (aabbOverlap(player, cb) && !c.active){
+      c.active = true;
+      spawnParticles(c.x+12,c.y+24, PAL.amber, 10, 100);
+      hudFlash = {timer:1.5, text: STR.checkpointReached};
+    }
+  }
+
+  // ---- pickups ----
+  for (const p of world.pickups){
+    if (p.taken) continue;
+    p.bob += dt*4;
+    const pb = {x:p.x,y:p.y+Math.sin(p.bob)*4, w:p.w,h:p.h};
+    if (aabbOverlap(player, pb)){
+      p.taken = true;
+      spawnParticles(p.x+12,p.y+12, p.kind==="shard"?PAL.amber:p.kind==="heart"?PAL.heart:PAL.amber, 8, 100);
+      if (p.kind==="heart"){ player.maxHp += 2; player.hp += 2; hudFlash={timer:1.5,text:STR.heartFound}; }
+      else if (p.kind==="coin"){ player.coins += 5; }
+      else if (p.kind==="shard"){ player.shards += 1; hudFlash={timer:2.5,text:STR.shardFound}; }
+    }
+  }
+
+  // ---- enemies ----
+  for (const e of world.enemies){
+    if (e.dead) continue;
+    updateEnemy(e, dt, rowsArr);
+    if (e.hp<=0){
+      e.dead = true;
+      gainXp(e.xp);
+      spawnParticles(e.x+e.w/2,e.y+e.h/2, PAL.enemyAccent, 10, 160);
+    }
+  }
+  world.enemies = world.enemies.filter(e=> !e.dead || true); // keep for draw fade; simple
+
+  // ---- boss spawn trigger ----
+  if (!world.bossSpawned && player.x + player.w/2 > world.bossGateX){
+    world.bossSpawned = true;
+    world.boss = makeEnemy(world.boss.kind, world.boss.x, world.boss.y);
+    world.boss.hp = world.boss.maxHp = zones[zoneIdx]().boss.hp;
+    world.boss.x = zones[zoneIdx]().boss.x;
+    world.boss.y = zones[zoneIdx]().boss.y;
+  }
+  if (world.boss && !world.boss.dead){
+    updateBoss(world.boss, dt, rowsArr);
+    if (world.boss.hp<=0){
+      world.boss.dead = true;
+      world.bossDefeated = true;
+      gainXp(world.boss.xp);
+      spawnParticles(world.boss.x+world.boss.w/2, world.boss.y+world.boss.h/2, PAL.amber, 30, 260);
+      hudFlash = {timer:2.5, text: STR.bossDefeated};
+      // advance zone after short delay handled via timer
+      world._advanceTimer = 2.0;
+    }
+  }
+  if (world._advanceTimer!=null){
+    world._advanceTimer -= dt;
+    if (world._advanceTimer<=0){
+      world._advanceTimer = null;
+      if (zoneIdx < zones.length-1) loadZone(zoneIdx+1);
+      else showEnd(true);
+    }
+  }
+
+  // ---- projectiles ----
+  for (const pr of projectiles){
+    pr.x += pr.vx*dt; pr.y += pr.vy*dt; pr.life -= dt;
+    const tx = Math.floor((pr.x+pr.w/2)/TILE), ty = Math.floor((pr.y+pr.h/2)/TILE);
+    if (solidAt(rowsArr, tx, ty)) pr.life = 0;
+    if (pr.fromPlayer){
+      for (const e of world.enemies){
+        if (e.dead) continue;
+        if (aabbOverlap(pr, e)){
+          e.hp -= pr.dmg; e.hitFlash=0.18; pr.life=0;
+          spawnParticles(e.x+e.w/2,e.y+e.h/2, PAL.amber, 5, 140);
+        }
+      }
+      if (world.boss && !world.boss.dead && aabbOverlap(pr, world.boss)){
+        world.boss.hp -= pr.dmg; world.boss.hitFlash=0.18; pr.life=0;
+        spawnParticles(world.boss.x+world.boss.w/2, world.boss.y+world.boss.h/2, PAL.amber, 5, 140);
+      }
+    } else {
+      if (aabbOverlap(pr, player)){ damagePlayer(pr.dmg); pr.life=0; }
+    }
+  }
+  projectiles = projectiles.filter(p=>p.life>0);
+
+  // ---- enemy melee contact damage ----
+  for (const e of world.enemies){
+    if (e.dead) continue;
+    if (aabbOverlap(player, e)) damagePlayer(e.dmg);
+  }
+  if (world.boss && !world.boss.dead && aabbOverlap(player, world.boss)) damagePlayer(world.boss.dmg);
+
+  // ---- particles ----
+  for (const p of particles){ p.age+=dt; p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=400*dt; }
+  particles = particles.filter(p=>p.age<p.life);
+
+  if (hudFlash.timer>0) hudFlash.timer -= dt;
+
+  // ---- camera ----
+  const targetX = player.x - VW/2 + player.w/2;
+  camera.x += (targetX - camera.x) * Math.min(1, dt*6);
+  camera.x = Math.max(0, Math.min(camera.x, world.width - VW));
+  camera.y = 0;
+
+  prevCmds = cmds;
+}
+
+function updateEnemy(e, dt, rowsArr){
+  e.hitFlash = Math.max(0, e.hitFlash-dt);
+  e.timer -= dt;
+  // simple patrol/chase FSM
+  const dx = (player.x+player.w/2) - (e.x+e.w/2);
+  const dist = Math.abs(dx);
+  if (e.state==="patrol"){
+    if (dist < 220) e.state="chase";
+    else {
+      if (e.timer<=0){ e.dir = -e.dir; e.timer = 1.5+rngLogic()*1.5; }
+      e.vx = e.dir*e.speed*0.5;
+    }
+  } else if (e.state==="chase"){
+    if (dist > 320) e.state="patrol";
+    e.vx = Math.sign(dx)*e.speed;
+  }
+  e.vy += GRAVITY*dt;
+  if (e.vy>1200) e.vy=1200;
+  moveAndCollide(e, dt, rowsArr);
+  if (e.x<0) e.x=0;
+  if (e.x+e.w>world.width) e.x=world.width-e.w;
+}
+
+function updateBoss(b, dt, rowsArr){
+  b.hitFlash = Math.max(0, b.hitFlash-dt);
+  b.timer -= dt;
+  const dx = (player.x+player.w/2)-(b.x+b.w/2);
+  const dist = Math.abs(dx);
+  b.dir = Math.sign(dx)||1;
+  if (b.timer<=0){
+    b.phase = (b.phase+1)%3;
+    b.timer = 1.6+rngLogic()*0.8;
+    if (b.phase===1 && dist<420){
+      // lunge
+      b.vx = b.dir*b.speed*2.2;
+      spawnParticles(b.x+b.w/2,b.y+b.h, PAL.amber, 6, 100);
+    } else if (b.phase===2){
+      // ranged burst
+      projectiles.push({x:b.x+b.w/2, y:b.y+b.h/2, vx:b.dir*260, vy:-80, w:16,h:16, life:2, dmg:1.5, fromPlayer:false});
+      projectiles.push({x:b.x+b.w/2, y:b.y+b.h/2, vx:b.dir*260, vy:80, w:16,h:16, life:2, dmg:1.5, fromPlayer:false});
+    } else {
+      b.vx = b.dir*b.speed*0.4;
+    }
+  } else if (b.phase!==1){
+    b.vx = b.dir*b.speed*0.4;
+  }
+  b.vy += GRAVITY*dt;
+  if (b.vy>1200) b.vy=1200;
+  moveAndCollide(b, dt, rowsArr);
+  if (b.x<0) b.x=0;
+  if (b.x+b.w>world.width) b.x=world.width-b.w;
+}
+
+/* ============================== RENDER ============================== */
+function bgColors(){
+  if (world.theme==="forest") return PAL.forestBg;
+  if (world.theme==="cave") return PAL.caveBg;
+  return PAL.iceBg;
+}
+function groundColors(){
+  if (world.theme==="forest") return [PAL.forestGround, PAL.forestGroundTop];
+  if (world.theme==="cave") return [PAL.caveGround, PAL.caveGroundTop];
+  return [PAL.iceGround, PAL.iceGroundTop];
+}
+
+function drawParallax(){
+  const [c1,c2,c3] = bgColors();
+  ctx.fillStyle = c1; ctx.fillRect(0,0,VW,VH);
+  // layer 2 - rounded hills with parallax
+  ctx.fillStyle = c2;
+  const off2 = -(camera.x*0.3) % 200;
+  for (let x=off2-200; x<VW+200; x+=200){
+    ctx.beginPath();
+    ctx.ellipse(x+100, VH-60, 140, 90, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.fillStyle = c3;
+  const off3 = -(camera.x*0.55) % 160;
+  for (let x=off3-160; x<VW+160; x+=160){
+    ctx.beginPath();
+    ctx.ellipse(x+80, VH-30, 110, 70, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+}
+
+function worldToScreenX(x){ return x - camera.x; }
+
+function drawTiles(){
+  const [groundC, topC] = groundColors();
+  const startTx = Math.max(0, Math.floor(camera.x/TILE)-1);
+  const endTx = Math.min(world.rows[0].length, Math.ceil((camera.x+VW)/TILE)+1);
+  for (let ty=0; ty<world.rows.length; ty++){
+    for (let tx=startTx; tx<endTx; tx++){
+      const t = world.rows[ty][tx];
+      const sx = worldToScreenX(tx*TILE), sy = ty*TILE;
+      if (t==='#' || t==='P'){
+        ctx.fillStyle = groundC;
+        ctx.fillRect(sx, sy, TILE, TILE);
+        ctx.fillStyle = topC;
+        ctx.fillRect(sx, sy, TILE, 6);
+      } else if (t==='^'){
+        ctx.fillStyle = PAL.spike;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy+TILE);
+        ctx.lineTo(sx+TILE/2, sy+TILE*0.4);
+        ctx.lineTo(sx+TILE, sy+TILE);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+  }
+}
+
+function drawHero(){
+  const sx = worldToScreenX(player.x);
+  const sy = player.y;
+  const bob = player.onGround ? Math.sin(player.anim)*2 : 0;
+  ctx.save();
+  if (player.invuln>0 && Math.floor(player.invuln*10)%2===0) ctx.globalAlpha = 0.4;
+  // body
+  ctx.fillStyle = PAL.hero;
+  roundRect(sx+2, sy+10+bob, player.w-4, player.h-10, 8); ctx.fill();
+  // head
+  ctx.fillStyle = PAL.heroAccent;
+  roundRect(sx+4, sy+bob, player.w-8, 14, 6); ctx.fill();
+  // sword swing
+  if (player.attackTimer>0){
+    const box = swordBox();
+    ctx.fillStyle = PAL.amber;
+    roundRect(worldToScreenX(box.x), box.y, box.w, box.h, 4);
+    ctx.globalAlpha = 0.7; ctx.fill(); ctx.globalAlpha = player.invuln>0?0.4:1;
+  } else {
+    // idle sword
+    ctx.fillStyle = "#cfd6dd";
+    const sword_x = player.facing>0 ? sx+player.w-2 : sx-10;
+    ctx.fillRect(sword_x, sy+14+bob, 12, 5);
+  }
+  ctx.restore();
+}
+
+function drawEnemy(e){
+  if (e.dead) return;
+  const sx = worldToScreenX(e.x);
+  ctx.save();
+  if (e.hitFlash>0) ctx.fillStyle = "#ffffff";
+  else ctx.fillStyle = e.isBoss ? PAL.boss : PAL.enemy;
+  roundRect(sx, e.y, e.w, e.h, 8); ctx.fill();
+  // eyes
+  ctx.fillStyle = e.hitFlash>0 ? PAL.boss : PAL.enemyAccent;
+  const eyeY = e.y + e.h*0.3;
+  ctx.beginPath(); ctx.arc(sx+e.w*0.3, eyeY, e.isBoss?6:3, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(sx+e.w*0.7, eyeY, e.isBoss?6:3, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+  // boss hp bar
+  if (e.isBoss){
+    const bw = 200;
+    const bx = VW/2-bw/2, by = 20;
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fillRect(bx,by,bw,12);
+    ctx.fillStyle = PAL.heart;
+    ctx.fillRect(bx,by,bw*Math.max(0,e.hp/e.maxHp),12);
+    ctx.strokeStyle = PAL.text; ctx.lineWidth=1.5;
+    ctx.strokeRect(bx,by,bw,12);
+    ctx.fillStyle = PAL.text;
+    ctx.font="13px sans-serif"; ctx.textAlign="center";
+    ctx.fillText(STR.bossNames[e.kind]||"Boss", VW/2, by-6);
+  }
+}
+
+function drawPickup(p){
+  if (p.taken) return;
+  const sx = worldToScreenX(p.x);
+  const sy = p.y + Math.sin(p.bob)*4;
+  ctx.save();
+  if (p.kind==="shard"){
+    ctx.fillStyle = PAL.amber;
+    ctx.translate(sx+12, sy+12); ctx.rotate(Math.PI/4);
+    ctx.fillRect(-9,-9,18,18);
+  } else if (p.kind==="heart"){
+    ctx.fillStyle = PAL.heart;
+    ctx.beginPath();
+    ctx.arc(sx+8,sy+8,7,0,Math.PI*2);
+    ctx.arc(sx+16,sy+8,7,0,Math.PI*2);
+    ctx.moveTo(sx+2,sy+10);
+    ctx.lineTo(sx+12,sy+22);
+    ctx.lineTo(sx+22,sy+10);
+    ctx.fill();
+  } else {
+    ctx.fillStyle = PAL.amber;
+    ctx.beginPath(); ctx.arc(sx+12,sy+12,10,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle = "#8a5a1a"; ctx.lineWidth=2; ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawCheckpoint(c){
+  const sx = worldToScreenX(c.x);
+  ctx.fillStyle = c.active ? PAL.amber : "#7a7a7a";
+  ctx.fillRect(sx+10, c.y, 4, 48);
+  ctx.beginPath();
+  ctx.arc(sx+12, c.y, 10, 0, Math.PI*2);
+  ctx.fill();
+}
+
+function drawProjectile(pr){
+  const sx = worldToScreenX(pr.x);
+  ctx.fillStyle = pr.fromPlayer ? PAL.amber : PAL.heart;
+  roundRect(sx, pr.y, pr.w, pr.h, 6); ctx.fill();
+}
+
+function drawParticles(){
+  for (const p of particles){
+    const a = 1 - p.age/p.life;
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = Math.max(0,a);
+    ctx.fillRect(worldToScreenX(p.x), p.y, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+
+function drawHUD(){
+  // hearts
+  const heartCount = Math.ceil(player.maxHp/2);
+  for (let i=0;i<heartCount;i++){
+    const hx = 14+i*22, hy=14;
+    const filled = player.hp - i*2;
+    ctx.fillStyle = filled>=2 ? PAL.heart : filled>=1 ? "#c97" : "#5a4a40";
+    ctx.beginPath();
+    ctx.arc(hx+5,hy+5,5,0,Math.PI*2);
+    ctx.arc(hx+11,hy+5,5,0,Math.PI*2);
+    ctx.moveTo(hx,hy+7);
+    ctx.lineTo(hx+8,hy+15);
+    ctx.lineTo(hx+16,hy+7);
+    ctx.fill();
+  }
+  // mana
+  for (let i=0;i<player.maxMana;i++){
+    const mx = 14+i*16, my=38;
+    ctx.fillStyle = i<player.mana ? PAL.amber : "#5a4a40";
+    ctx.beginPath(); ctx.arc(mx+6,my+6,6,0,Math.PI*2); ctx.fill();
+  }
+  // level / xp
+  ctx.fillStyle = PAL.text;
+  ctx.font="14px sans-serif"; ctx.textAlign="left";
+  ctx.fillText(STR.levelLabel+" "+player.level, 14, 70);
+  ctx.fillStyle="rgba(0,0,0,0.35)"; ctx.fillRect(14,76,120,6);
+  ctx.fillStyle=PAL.amber; ctx.fillRect(14,76,120*(player.xp/player.xpToNext),6);
+  // shards / coins
+  ctx.fillStyle = PAL.text;
+  ctx.textAlign="right";
+  ctx.fillText(STR.shardsLabel+": "+player.shards+"/3", VW-14, 24);
+  ctx.fillText(STR.coinsLabel+": "+player.coins, VW-14, 44);
+  // zone name
+  ctx.textAlign="center";
+  ctx.font="16px sans-serif";
+  ctx.fillText(world.name, VW/2, 24);
+
+  if (hudFlash.timer>0){
+    ctx.globalAlpha = Math.min(1, hudFlash.timer);
+    ctx.fillStyle = PAL.amber;
+    ctx.font="20px sans-serif";
+    ctx.fillText(hudFlash.text, VW/2, VH*0.18);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function render(alpha){
+  ctx.clearRect(0,0,VW,VH);
+  if (gameState!=="playing") return;
+  drawParallax();
+  drawTiles();
+  for (const c of world.checkpoints) drawCheckpoint(c);
+  for (const p of world.pickups) drawPickup(p);
+  for (const e of world.enemies) drawEnemy(e);
+  if (world.boss && !world.boss.dead) drawEnemy(world.boss);
+  for (const pr of projectiles) drawProjectile(pr);
+  drawHero();
+  drawParticles();
+  drawHUD();
+}
+
+/* ============================== LOOP ============================== */
+const STEP = 1000/60;
+let acc=0, last=performance.now(), paused=false, frames=0, fpsAt=last;
+addEventListener("blur", ()=>paused=true);
+addEventListener("focus", ()=>{paused=false; last=performance.now();});
+
+function frame(now){
+  requestAnimationFrame(frame);
+  if (paused) return;
+  acc += now-last; last = now;
+  const cmds = commands();
+  let steps=0;
+  while (acc>=STEP && steps<5){ update(STEP/1000, cmds); acc-=STEP; steps++; }
+  render(acc/STEP);
+  if (dev && (frames++, now-fpsAt>=500)){
+    const fps = Math.round(frames*1000/(now-fpsAt));
+    frames=0; fpsAt=now;
+    document.getElementById("dev").textContent = fps+" fps | enemies:"+(world?world.enemies.filter(e=>!e.dead).length:0)+" | particles:"+particles.length;
+  }
+}
+requestAnimationFrame(frame);
+
+/* ============================== UI WIRING ============================== */
+document.getElementById("startBtn").addEventListener("click", startGame);
+document.getElementById("restartBtn").addEventListener("click", startGame);
+</script>
+</body>
+</html>
